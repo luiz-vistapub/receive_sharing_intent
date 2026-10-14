@@ -27,123 +27,41 @@ object FileDirectory {
      * @author paulburke
      */
     fun getAbsolutePath(context: Context, uri: Uri): String? {
-
-        // DocumentProvider
-        if (DocumentsContract.isDocumentUri(context, uri)) {
-            // ExternalStorageProvider
-            if (isExternalStorageDocument(uri)) {
-                val docId = DocumentsContract.getDocumentId(uri)
-                val split = docId.split(":".toRegex()).dropLastWhile { it.isEmpty() }.toTypedArray()
-                val type = split[0]
-
-                return if ("primary".equals(type, ignoreCase = true)) {
-                    Environment.getExternalStorageDirectory().toString() + "/" + split[1]
-                } else {
-                    getDataColumn(context, uri, null, null)
-                }
-            } else if (isDownloadsDocument(uri)) {
-                return try {
-                    val id = DocumentsContract.getDocumentId(uri)
-                    val contentUri = ContentUris.withAppendedId(
-                            Uri.parse("content://downloads/public_downloads"), java.lang.Long.valueOf(id))
-
-                    getDataColumn(context, contentUri, null, null)
-                } catch (exception: Exception) {
-                    getDataColumn(context, uri, null, null)
-                }
-            } else if (isMediaDocument(uri)) {
-                val docId = DocumentsContract.getDocumentId(uri)
-                val split = docId.split(":".toRegex()).dropLastWhile { it.isEmpty() }.toTypedArray()
-                val type = split[0]
-
-                var contentUri: Uri? = null
-                when (type) {
-                    "image" -> contentUri = MediaStore.Images.Media.EXTERNAL_CONTENT_URI
-                    "video" -> contentUri = MediaStore.Video.Media.EXTERNAL_CONTENT_URI
-                    "audio" -> contentUri = MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
-                }
-
-                if (contentUri == null) return null
-
-                val selection = "_id=?"
-                val selectionArgs = arrayOf(split[1])
-                return getDataColumn(context, contentUri, selection, selectionArgs)
-            }// MediaProvider
-            // DownloadsProvider
-        } else if ("content".equals(uri.scheme, ignoreCase = true)) {
-            return getDataColumn(context, uri, null, null)
-        }
-
-        return uri.path
+        // Security fix (Memoryboard fork): only content:// URIs are accepted
+        // and the data is always copied into a dedicated cache folder under a
+        // name generated here. Upstream builds the target path from the
+        // sharing app's _display_name (path traversal, "Dirty Stream") and
+        // returns file:// and _data paths as-is, so a malicious app could make
+        // this app overwrite or read its own private files.
+        if (!"content".equals(uri.scheme, ignoreCase = true)) return null
+        return copyToPrivateCache(context, uri)
     }
 
-    /**
-     * Get the value of the data column for this Uri. This is useful for
-     * MediaStore Uris, and other file-based ContentProviders.
-     *
-     * @param context The context.
-     * @param uri The Uri to query.
-     * @param selection (Optional) Filter used in the query.
-     * @param selectionArgs (Optional) Selection arguments used in the query.
-     * @return The value of the _data column, which is typically a file path.
-     */
-    private fun getDataColumn(context: Context, uri: Uri, selection: String?,
-                              selectionArgs: Array<String>?): String? {
-
-        if (uri.authority != null) {
-            var cursor: Cursor? = null
-            val column = "_display_name"
-            val projection = arrayOf(column)
-            var targetFile: File? = null
-            try {
-                cursor = context.contentResolver.query(uri, projection, selection, selectionArgs, null)
-                if (cursor != null && cursor.moveToFirst()) {
-                    val columnIndex = cursor.getColumnIndexOrThrow(column)
-                    val fileName = cursor.getString(columnIndex)
-                    Log.i("FileDirectory", "File name: $fileName")
-                    targetFile = File(context.cacheDir, fileName)
-                }
-            } finally {
-                cursor?.close()
-            }
-
-            if (targetFile == null) {
-                val mimeType = context.contentResolver.getType(uri)
-                val prefix = with(mimeType ?: "") {
-                    when {
-                        startsWith("image") -> "IMG"
-                        startsWith("video") -> "VID"
-                        else -> "FILE"
-                    }
-                }
-                val type = MimeTypeMap.getSingleton().getExtensionFromMimeType(mimeType)
-                targetFile = File(context.cacheDir, "${prefix}_${Date().time}.$type")
-            }
-
-            context.contentResolver.openInputStream(uri)?.use { input ->
-                FileOutputStream(targetFile).use { fileOut ->
-                    input.copyTo(fileOut)
-                }
-            }
-            return targetFile.path
+    private fun copyToPrivateCache(context: Context, uri: Uri): String? {
+        val dir = File(context.cacheDir, "receive_sharing_intent")
+        if (!dir.exists() && !dir.mkdirs()) return null
+        val mimeType = context.contentResolver.getType(uri)
+        val extension = MimeTypeMap.getSingleton().getExtensionFromMimeType(mimeType)
+            ?.takeIf { it.matches(Regex("[A-Za-z0-9]{1,8}")) }
+        val prefix = when {
+            mimeType?.startsWith("image") == true -> "IMG"
+            mimeType?.startsWith("video") == true -> "VID"
+            else -> "FILE"
         }
-
-        var cursor: Cursor? = null
-        val column = "_data"
-        val projection = arrayOf(column)
-
-        try {
-            cursor = context.contentResolver.query(uri, projection, selection, selectionArgs, null)
-            if (cursor != null && cursor.moveToFirst()) {
-                val columnIndex = cursor.getColumnIndexOrThrow(column)
-                return cursor.getString(columnIndex)
+        val name = "${prefix}_${UUID.randomUUID()}" + (extension?.let { ".$it" } ?: "")
+        val target = File(dir, name)
+        return try {
+            val input = context.contentResolver.openInputStream(uri) ?: return null
+            input.use { stream ->
+                FileOutputStream(target).use { out -> stream.copyTo(out) }
             }
-        } finally {
-            cursor?.close()
+            target.path
+        } catch (e: Exception) {
+            Log.w("FileDirectory", "Could not copy shared content", e)
+            target.delete()
+            null
         }
-        return null
     }
-
 
     /**
      * @param uri The Uri to check.
