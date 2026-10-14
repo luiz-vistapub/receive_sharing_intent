@@ -118,22 +118,40 @@ class ReceiveSharingIntentPlugin : FlutterPlugin, ActivityAware, MethodCallHandl
             }
 
             Intent.ACTION_SEND -> {
+                // Memoryboard fork: a file shared with a caption (EXTRA_STREAM +
+                // EXTRA_TEXT) yields both items; upstream dropped the text.
                 val uri = intent.parcelable<Uri>(Intent.EXTRA_STREAM)
-                val text = intent.getStringExtra(Intent.EXTRA_TEXT)
-                toJsonObject(uri, text, intent.type)?.let { JSONArray(listOf(it)) }
+                val items = mutableListOf<JSONObject>()
+                if (uri != null) toJsonObject(uri, null, intent.type)?.takeIf { it.hasPath() }?.let { items.add(it) }
+                sharedTextItem(intent)?.let { items.add(it) }
+                if (items.isEmpty()) null else JSONArray(items)
             }
 
             Intent.ACTION_SEND_MULTIPLE -> {
                 val uris = intent.parcelableArrayList<Uri>(Intent.EXTRA_STREAM)
                 val mimeTypes = intent.getStringArrayExtra(Intent.EXTRA_MIME_TYPES)
-
-                uris?.mapIndexedNotNull { index, uri ->
-                    toJsonObject(uri, null, mimeTypes?.getOrNull(index))
-                }?.let { JSONArray(it) }
+                val items = uris?.mapIndexedNotNull { index, uri ->
+                    toJsonObject(uri, null, mimeTypes?.getOrNull(index))?.takeIf { it.hasPath() }
+                }?.toMutableList() ?: mutableListOf()
+                sharedTextItem(intent)?.let { items.add(it) }
+                if (items.isEmpty()) null else JSONArray(items)
             }
 
             else -> null
         }
+    }
+
+    // Items whose content could not be copied (e.g. rejected file:// URIs)
+    // carry no path and are dropped.
+    private fun JSONObject.hasPath() = has("path") && !isNull("path")
+
+    private fun sharedTextItem(intent: Intent): JSONObject? {
+        val text = intent.getCharSequenceExtra(Intent.EXTRA_TEXT)?.toString()
+        if (text.isNullOrBlank()) return null
+        return JSONObject()
+                .put("path", text)
+                .put("type", MediaType.TEXT.value)
+                .put("mimeType", "text/plain")
     }
 
     // content can only be uri or string
